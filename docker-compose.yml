@@ -1,0 +1,15 @@
+services:
+  subtitle-segmenter:
+    build: .
+    image: subtitle-segmenter:latest
+    container_name: subtitle-segmenter
+    ports:
+      - "8000:8000"
+    environment:
+      # Defaults used when a request omits the corresponding parameter.
+      DEFAULT_MAX_CHARS: "42"
+      DEFAULT_MIN_DURATION_MS: "1000"
+      DEFAULT_MAX_DURATION_MS: "7000"
+      DEFAULT_TARGET_DURATION_MS: "3000"
+      DEFAULT_PAUSE_THRESHOLD_MS: "500"
+    restart: unless-stopped
