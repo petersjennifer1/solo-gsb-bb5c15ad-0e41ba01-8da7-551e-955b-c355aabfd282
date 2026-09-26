@@ -152,6 +152,37 @@ class PlaceRequest(SegmentRequest):
     )
 
 
+class HighlightRequest(BaseModel):
+    """Request for the local highlight-reel planner (``POST /highlights``)."""
+
+    words: list[Word] = Field(
+        min_length=1,
+        max_length=100,
+        description=(
+            "time-ordered, non-overlapping word-level transcript (at most "
+            "100 words)"
+        ),
+    )
+    phrases: list[list[Annotated[str, Field(min_length=1)]]] = Field(
+        min_length=1,
+        max_length=8,
+        description=(
+            "1 to 8 target phrases; each phrase is a non-empty array of "
+            "non-empty word texts matched exactly (and case-sensitively) "
+            "against runs of consecutive transcript words. Repeated and "
+            "overlapping occurrences all count"
+        ),
+    )
+    max_clip_duration_ms: int = Field(
+        gt=0,
+        description=(
+            "positive per-clip cap in milliseconds: every chosen clip's "
+            "time span (end_ms of its last word minus start_ms of its first "
+            "word) must not exceed it"
+        ),
+    )
+
+
 class SegmentOut(BaseModel):
     index: int
     text: str
@@ -177,3 +208,19 @@ class PlaceResponse(BaseModel):
     segment_count: int
     total_cost: float
     segments: list[PlacedSegmentOut]
+
+
+class HighlightClipOut(BaseModel):
+    index: int
+    start_ms: int
+    end_ms: int
+    duration_ms: int
+    word_start: int
+    word_end: int
+    covered_phrases: list[int]
+
+
+class HighlightResponse(BaseModel):
+    clip_count: int
+    total_score: int
+    clips: list[HighlightClipOut]

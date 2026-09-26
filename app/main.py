@@ -7,8 +7,12 @@ from fastapi.responses import PlainTextResponse
 
 from . import config
 from .cut import segment_with_deletions
+from .highlights import plan_highlights
 from .models import (
     CutRequest,
+    HighlightClipOut,
+    HighlightRequest,
+    HighlightResponse,
     PlaceRequest,
     PlaceResponse,
     PlacedSegmentOut,
@@ -43,7 +47,14 @@ app = FastAPI(
         "placement are decided jointly, with a 1-point cost for every pair of "
         "adjacent subtitles placed in different areas, ties broken by fewer "
         "subtitles and then by the area sequence (bottom preferred); every "
-        "subtitle must keep one area fully clear for its whole duration."
+        "subtitle must keep one area fully clear for its whole duration. "
+        "The /highlights endpoint reuses the word-level transcript to plan a "
+        "local highlight reel: target phrases are matched on exact "
+        "consecutive word texts, and pairwise time-non-overlapping clips "
+        "(spans of consecutive words capped in duration) are chosen so every "
+        "phrase is fully contained in some clip, minimising the sum of clip "
+        "durations (ms) plus a 1000-point fee per clip; ties prefer fewer "
+        "clips and then the lexicographically smaller word-index sequence."
     ),
 )
 
@@ -65,6 +76,7 @@ def root() -> dict:
             "segment_cut_srt": "POST /segment/cut/srt",
             "segment_place_json": "POST /segment/place",
             "segment_place_vtt": "POST /segment/place/vtt",
+            "highlights": "POST /highlights",
             "health": "GET /health",
         },
         "defaults": {
@@ -201,4 +213,45 @@ def segment_place_vtt(req: PlaceRequest) -> PlainTextResponse:
     result = _run_place(req)
     return PlainTextResponse(
         to_vtt(result.segments), media_type="text/vtt; charset=utf-8"
+    )
+
+
+@app.post("/highlights", response_model=HighlightResponse, tags=["highlights"])
+def highlights(req: HighlightRequest) -> HighlightResponse:
+    """Plan a non-overlapping highlight reel covering every target phrase.
+
+    Each target phrase is matched on exact, case-sensitive equality with a
+    consecutive run of word texts (repeated and overlapping occurrences all
+    count); a clip spans consecutive words, takes its timecodes from the
+    first word's start and the last word's end, may not exceed
+    ``max_clip_duration_ms``, and covers a phrase only when it fully
+    contains one of its hits.  The returned clips are pairwise
+    non-overlapping in time and minimise the sum of clip durations (ms)
+    plus a 1000-point fee per clip; ties prefer fewer clips and then the
+    lexicographically smaller time-ordered word-index pair sequence.
+    Returns 422 when no such selection exists.
+    """
+    try:
+        plan = plan_highlights(
+            req.words,
+            [list(phrase) for phrase in req.phrases],
+            max_clip_duration_ms=req.max_clip_duration_ms,
+        )
+    except SegmentationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return HighlightResponse(
+        clip_count=len(plan.clips),
+        total_score=plan.total_score,
+        clips=[
+            HighlightClipOut(
+                index=clip.index,
+                start_ms=clip.start_ms,
+                end_ms=clip.end_ms,
+                duration_ms=clip.duration_ms,
+                word_start=clip.word_start,
+                word_end=clip.word_end,
+                covered_phrases=list(clip.covered_phrases),
+            )
+            for clip in plan.clips
+        ],
     )
