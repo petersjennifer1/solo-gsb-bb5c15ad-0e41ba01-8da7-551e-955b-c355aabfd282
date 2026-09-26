@@ -7,8 +7,12 @@ from fastapi.responses import PlainTextResponse
 
 from . import config
 from .cut import segment_with_deletions
+from .highlights import plan_highlights
 from .models import (
+    ClipOut,
     CutRequest,
+    HighlightsRequest,
+    HighlightsResponse,
     PlaceRequest,
     PlaceResponse,
     PlacedSegmentOut,
@@ -44,6 +48,12 @@ app = FastAPI(
         "adjacent subtitles placed in different areas, ties broken by fewer "
         "subtitles and then by the area sequence (bottom preferred); every "
         "subtitle must keep one area fully clear for its whole duration."
+        " The /highlights endpoint plans a highlight reel: given 1-8 target "
+        "phrases (exact matches on consecutive word texts; repeated and "
+        "overlapping hits count) and a per-clip duration limit, it selects "
+        "time-non-overlapping word-span clips covering every phrase, "
+        "minimising total clip milliseconds plus 1000 per clip (ties: fewer "
+        "clips, then the lexicographically smaller word-index sequence)."
     ),
 )
 
@@ -65,6 +75,7 @@ def root() -> dict:
             "segment_cut_srt": "POST /segment/cut/srt",
             "segment_place_json": "POST /segment/place",
             "segment_place_vtt": "POST /segment/place/vtt",
+            "highlights": "POST /highlights",
             "health": "GET /health",
         },
         "defaults": {
@@ -201,4 +212,27 @@ def segment_place_vtt(req: PlaceRequest) -> PlainTextResponse:
     result = _run_place(req)
     return PlainTextResponse(
         to_vtt(result.segments), media_type="text/vtt; charset=utf-8"
+    )
+
+
+@app.post("/highlights", response_model=HighlightsResponse, tags=["highlights"])
+def highlights(req: HighlightsRequest) -> HighlightsResponse:
+    """Plan a highlight reel covering every target phrase.
+
+    Selects time-non-overlapping clips (spans of consecutive words, each no
+    longer than ``max_clip_ms``) such that every target phrase is fully
+    contained in at least one clip, minimising total clip milliseconds plus
+    1000 per clip; ties favour fewer clips, then the lexicographically
+    smaller ``(word_start, word_end)`` sequence.
+    """
+    try:
+        result = plan_highlights(
+            req.words, req.phrases, max_clip_ms=req.max_clip_ms
+        )
+    except SegmentationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return HighlightsResponse(
+        clip_count=len(result.clips),
+        total_score=result.total_score,
+        clips=[ClipOut(**vars(clip)) for clip in result.clips],
     )

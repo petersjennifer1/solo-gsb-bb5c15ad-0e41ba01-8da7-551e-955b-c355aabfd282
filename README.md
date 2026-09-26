@@ -1,6 +1,6 @@
 # 本地字幕切分 API（Python + FastAPI）
 
-接收**按时间排序、互不重叠的词级转写**（每个词含文字与起止毫秒），用**动态规划**寻找覆盖全部词、保持原有顺序的合法字幕切分，并支持 SRT 导出。另提供**视频删段重排**接口：给定原视频上的删除区间，丢弃被完整覆盖的词、将保留词按累计删除时长前移，再对各连续片段分别优化切分。还提供**遮挡避让与上下位置联合决策**接口：给定视频时间轴上的遮挡区间及其所在区域（`top` / `bottom`），在同一套切分规则之上联合决定每条字幕的分条与垂直位置，相邻字幕换区加 1 分，并以 WebVTT cue 行位置呈现。
+接收**按时间排序、互不重叠的词级转写**（每个词含文字与起止毫秒），用**动态规划**寻找覆盖全部词、保持原有顺序的合法字幕切分，并支持 SRT 导出。另提供**视频删段重排**接口：给定原视频上的删除区间，丢弃被完整覆盖的词、将保留词按累计删除时长前移，再对各连续片段分别优化切分。还提供**遮挡避让与上下位置联合决策**接口：给定视频时间轴上的遮挡区间及其所在区域（`top` / `bottom`），在同一套切分规则之上联合决定每条字幕的分条与垂直位置，相邻字幕换区加 1 分，并以 WebVTT cue 行位置呈现。另有**台词集锦规划**接口：给定 1～8 个目标短语与单片最长毫秒数，按词文本精确匹配连续词命中，规划一组时间互不重叠、覆盖全部短语的片段，最小化“总片长毫秒数 + 每片 1000 分”。
 
 服务启动后监听 **8000 端口**（见下文 [一键启动](#一键启动docker-compose)）：根信息 http://localhost:8000/ 、交互文档 http://localhost:8000/docs 。
 
@@ -465,6 +465,63 @@ curl -X POST http://localhost:8000/segment/place/vtt \
 
 JSON 与 VTT 两个端点共用**同一次联合决策结果**（仅输出格式不同）；双行字幕的换行同样以真实换行出现在 cue 文本中。
 
+### `POST /highlights` —— 台词集锦片段规划（JSON）
+
+给定**至多 100 个原词**的词级转写、**1～8 个目标短语**（每个短语是一串非空词文本）与正整数**单片最长毫秒数** `max_clip_ms`，在整条转写中规划一组**时间上互不重叠**的集锦片段，使每个目标短语至少被一个片段完整覆盖：
+
+- **命中**：短语按词文本与**连续原词**精确匹配（逐词相等、大小写敏感）；同一短语的重复命中、不同短语相互重叠的命中全部有效；
+- **候选片段**：任意一段连续原词 `i..j`，片头取词 `i` 的 `start_ms`、片尾取词 `j` 的 `end_ms`，片长（`end_ms - start_ms`）不得超过 `max_clip_ms`；片段**完整包含**某次命中（命中首词下标 ≥ `i` 且末词下标 ≤ `j`）才算覆盖对应短语；
+- **互不重叠**：所选片段的词区间两两不相交（端点相接允许，即前一片末词与后一片首词相邻）；
+- **优化目标**：最小化 `Σ片长(毫秒) + 1000 × 片数`；总分相同时先取**片数更少**的方案，再取**原词起止下标序列**（按时间排列的 `(word_start, word_end)` 对）字典序更小者；
+- **无解返回 `422`**：任一目标短语从未作为连续词出现、其命中本身超过片长上限，或覆盖全部短语所需的片段必然相互重叠。
+
+请求体：
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `words` | 数组 | 必填（1～100 个） | 词级转写，按时间排序且互不重叠，字段同 `/segment` |
+| `phrases` | 数组 | 必填（1～8 个） | 目标短语列表；每项为非空词文本数组，按词文本精确匹配连续原词 |
+| `max_clip_ms` | int | 必填 | 单片最长毫秒数，正整数 |
+
+请求示例（3 个目标短语、单片最长 3 秒；最优方案用一片 2700 ms 的片段同时覆盖 `How are you` 与 `world.`，比分成两片少花 1000 分）：
+
+```bash
+curl -X POST http://localhost:8000/highlights \
+  -H 'Content-Type: application/json' \
+  -d @examples/request_highlights.json
+```
+
+响应示例（`200`）：
+
+```json
+{
+  "clip_count": 2,
+  "total_score": 5100,
+  "clips": [
+    {
+      "index": 0,
+      "start_ms": 500,
+      "end_ms": 3200,
+      "duration_ms": 2700,
+      "word_start": 1,
+      "word_end": 4,
+      "phrases": [0, 2]
+    },
+    {
+      "index": 1,
+      "start_ms": 5200,
+      "end_ms": 5600,
+      "duration_ms": 400,
+      "word_start": 7,
+      "word_end": 7,
+      "phrases": [1]
+    }
+  ]
+}
+```
+
+片段按时间排列；`word_start` / `word_end` 为本次请求 `words` 的零基下标（含端点）；`phrases` 为该片段完整覆盖的目标短语下标（零基，按请求 `phrases` 顺序）；`total_score` = 各片 `duration_ms` 之和 + 1000 × 片数（上例为 2700 + 400 + 2 × 1000 = 5100）。
+
 ### `GET /health`
 
 返回 `{"status":"ok"}`（容器健康检查同样使用该端点）。
@@ -494,7 +551,6 @@ JSON 与 VTT 两个端点共用**同一次联合决策结果**（仅输出格式
   - `occlusions` 缺失、为空数组、`start_ms` / `end_ms` 为负、`start_ms >= end_ms`、`region` 不是 `"top"` / `"bottom"`；
   - 同一 `region` 的区间未按起点升序给出，或两两重叠（端点相接允许；`top` 与 `bottom` 互相独立）；
   - 不存在让每条字幕都拥有一个全程可用区域的切分（某时段上下区域同时被遮挡，或遮挡与字数 / 时长 / 行宽 / 人工边界等硬约束矛盾）——会返回类似：
-
   ```json
   {"detail": "no legal segmentation covers all words under the given constraints and occlusion areas: every subtitle must stay for its whole duration within an area (top or bottom) that has no positive-length intersection with a same-area occlusion, while respecting max_chars=42, min_duration_ms=1000, max_duration_ms=7000; try relaxing min_duration_ms / the other limits or shortening the occluded spans"}
   ```
@@ -502,6 +558,15 @@ JSON 与 VTT 两个端点共用**同一次联合决策结果**（仅输出格式
 
   ```json
   {"detail": "no legal segmentation covers all words under the given constraints (max_chars=42, max_line_chars=20, min_duration_ms=1000, max_duration_ms=7000); every subtitle — including the last one — must satisfy the duration limits (and, when set, fit on at most two lines of max_line_chars) and the required_break_after / keep_together boundaries, so try relaxing min_duration_ms or the other limits"}
+  ```
+- **集锦规划相关（`/highlights`）**：
+  - `words` 为空或超过 100 个、`phrases` 不在 1～8 个、某个短语为空数组或含空词文本、`max_clip_ms` 缺失或不是正整数；
+  - 词序列未按时间排序或存在重叠；
+  - 某个目标短语从未作为连续原词出现（无任何命中）；
+  - 存在命中但没有任何互不重叠、片长均不超过 `max_clip_ms` 的片段组合能覆盖全部短语（命中本身超长，或覆盖不同短语的片段必然重叠）——会返回类似：
+
+  ```json
+  {"detail": "no set of non-overlapping clips with duration <= max_clip_ms=1000 covers all 2 target phrase(s): every clip must fully contain a hit of each phrase it covers, so try raising max_clip_ms or shortening the phrases"}
   ```
 
 ---
@@ -518,7 +583,7 @@ JSON 与 VTT 两个端点共用**同一次联合决策结果**（仅输出格式
 | `DEFAULT_TARGET_DURATION_MS` | `3000` | `target_duration_ms` |
 | `DEFAULT_PAUSE_THRESHOLD_MS` | `500` | `pause_threshold_ms` |
 
-`max_line_chars` 没有环境变量默认值：省略该请求字段即不启用双行排版，行为与旧版完全一致。`required_break_after`、`keep_together` 同样没有环境变量默认值：省略即不施加任何人工边界。`deletions` 为 `/segment/cut` 的必填字段、`occlusions` 为 `/segment/place` 的必填字段，二者也都没有环境变量默认值；相邻字幕换区罚分固定为 1 分。
+`max_line_chars` 没有环境变量默认值：省略该请求字段即不启用双行排版，行为与旧版完全一致。`required_break_after`、`keep_together` 同样没有环境变量默认值：省略即不施加任何人工边界。`deletions` 为 `/segment/cut` 的必填字段、`occlusions` 为 `/segment/place` 的必填字段，二者也都没有环境变量默认值；相邻字幕换区罚分固定为 1 分。`/highlights` 的三个字段（`words`、`phrases`、`max_clip_ms`）均为必填，每片固定加 1000 分，同样无环境变量默认值。
 
 不需要外部数据库或密钥，开箱即用。
 
@@ -547,16 +612,17 @@ pytest
 
 ```
 app/
-  config.py      # 环境变量默认值与罚分常量（含换区罚分）
+  config.py      # 环境变量默认值与罚分常量（含换区罚分、集锦每片 1000 分）
   models.py      # Pydantic 请求/响应模型
   segmenter.py   # 动态规划切分核心（纯 Python，无 Web 依赖）
   cut.py         # 视频删段后的重排：删词、时间前移、分片段切分
   place.py       # 遮挡避让：分条与 top/bottom 位置联合动态规划
+  highlights.py  # 台词集锦规划：短语命中 + 互不重叠片段的集合覆盖动态规划
   srt.py         # SRT 时间戳与文档格式化
   vtt.py         # WebVTT 时间戳、文档格式化与 cue 行位置
-  main.py        # FastAPI 入口（/segment、/segment/srt、/segment/cut、/segment/cut/srt、/segment/place、/segment/place/vtt、/health）
-tests/           # unittest 测试（核心逻辑 + 删段重排 + 遮挡避让/位置 + API 集成）
-examples/        # 请求示例（基础 / 双行排版 / 人工编辑边界 / 删段重排 / 遮挡避让）
+  main.py        # FastAPI 入口（/segment、/segment/srt、/segment/cut、/segment/cut/srt、/segment/place、/segment/place/vtt、/highlights、/health）
+tests/           # unittest 测试（核心逻辑 + 删段重排 + 遮挡避让/位置 + 集锦规划 + API 集成）
+examples/        # 请求示例（基础 / 双行排版 / 人工编辑边界 / 删段重排 / 遮挡避让 / 集锦规划）
 Dockerfile
 docker-compose.yml
 requirements.txt
@@ -587,3 +653,5 @@ dp[i] = 按 (总代价, 字幕条数) 字典序取最小，枚举合法的字幕
 删段重排在进入 DP 之前做一次线性扫描：删除区间先校验升序、不重叠、`start < end`；随后按时间顺序遍历词，用指针推进区间——完整落入区间的词丢弃，与边界相交但未完整覆盖的词直接报错，保留词减去此前累计删除时长；凡是跨过删除区间的位置都开启新的连续片段。由于每个删除区间强制成为字幕边缘，总代价与硬约束都按字幕可加，因此各片段独立跑一次上述 DP 即等价于全局强制断点后的最优解；各片段的字幕顺序拼接、统一编号，`word_start` / `word_end` 映射回原请求下标。
 
 遮挡避让把“位置”纳入同一个动态规划，而不是先切分再摆位置：遮挡区间先按区域分别校验、排序，可用性只需对合并后的区间数组做一次二分查找。状态 `dp[i][area]` 表示“从第 `i` 个词切到结尾、且第一条字幕放在 `area`（top / bottom）”的最优方案，枚举的候选字幕与普通切分完全一致（共用同一套候选枚举与排版代价）；对每个在该区域**全程无正长度遮挡交集**的候选 `i..j`，从 `dp[j+1][next]` 两个区域的状态转移，当后续仍有字幕且 `next ≠ area` 时加上 1 分换区罚分。区域可用性随候选跨度单调：某区域一旦被遮挡，从同一起点继续扩展的候选在该区域也不可用，两个区域都不可用时即可停止枚举。平局比较按 `(总代价, 字幕条数, 区域序列)` 字典序，其中区域以 `bottom=0 < top=1` 编码，故等价于“条数更少，再 bottom 优先”。两个起点区域都不可达即返回 `422`。时间复杂度仍为 O(n²)（每个状态保存区域序列用于平局比较，空间 O(n²)）。
+
+集锦规划把“还需覆盖哪些短语”压缩成位掩码做精确动态规划。先为每个短语 `p` 预处理 `hit_end[p][i]`——从词 `i` 起最近一次命中的末词下标（从右向左一趟扫描，匹配按词文本精确比较，重复与重叠命中自然全部计入），于是片段 `i..j` 覆盖短语 `p` 当且仅当 `hit_end[p][i] ≤ j`；某短语从词 0 起就没有命中时直接返回 `422`。再为每个起点词 `i` 枚举全部合法片段（片长随 `j` 单调增长，超过 `max_clip_ms` 即停；不覆盖任何短语的片段直接丢弃——删掉它只会更优）。状态 `dp[i][mask]` 表示“只用从第 `i` 个词开始的片段、覆盖 `mask` 中尚未覆盖的短语”的最优方案，只保存 `(总分, 片数)` 与**首片决策**（跳过词 `i`，或首片末词下标 `j`）：总分与片数都是整数，按 `(总分, 片数)` 取最小即已确定前两级平局规则；第三级“下标序列字典序”可局部化——同分时“取”恒优于“跳过”（首片起点 `i` 必小于跳过后任何方案的起点），同起点的两片取较小 `j` 者（与后缀无关），因此每个状态只留一个决策即等价于全局字典序最小，最后沿决策指针重建片段序列。`dp[0][全部短语]` 不可达即返回 `422`。时间复杂度 O(n²·m·2^m)（n ≤ 100、m ≤ 8），空间 O(n·2^m)。

@@ -152,6 +152,38 @@ class PlaceRequest(SegmentRequest):
     )
 
 
+# Non-empty word text inside a target phrase.
+PhraseText = Annotated[str, Field(min_length=1)]
+
+# A target phrase: a non-empty list of word texts matched exactly against
+# consecutive transcript words.
+Phrase = Annotated[list[PhraseText], Field(min_length=1)]
+
+
+class HighlightsRequest(BaseModel):
+    words: list[Word] = Field(
+        min_length=1,
+        max_length=100,
+        description=(
+            "time-ordered, non-overlapping word-level transcript "
+            "(at most 100 words)"
+        ),
+    )
+    phrases: list[Phrase] = Field(
+        min_length=1,
+        max_length=8,
+        description=(
+            "1..8 target phrases; each is a non-empty list of word texts "
+            "matched exactly against consecutive transcript words (repeated "
+            "and overlapping hits all count)"
+        ),
+    )
+    max_clip_ms: int = Field(
+        gt=0,
+        description="maximum duration of a single clip in milliseconds",
+    )
+
+
 class SegmentOut(BaseModel):
     index: int
     text: str
@@ -177,3 +209,24 @@ class PlaceResponse(BaseModel):
     segment_count: int
     total_cost: float
     segments: list[PlacedSegmentOut]
+
+
+class ClipOut(BaseModel):
+    index: int
+    start_ms: int
+    end_ms: int
+    duration_ms: int
+    word_start: int
+    word_end: int
+    phrases: list[int] = Field(
+        description="zero-based indices of the request's target phrases "
+        "that this clip fully contains (covers)"
+    )
+
+
+class HighlightsResponse(BaseModel):
+    clip_count: int
+    total_score: int = Field(
+        description="sum of clip durations in milliseconds plus 1000 per clip"
+    )
+    clips: list[ClipOut]

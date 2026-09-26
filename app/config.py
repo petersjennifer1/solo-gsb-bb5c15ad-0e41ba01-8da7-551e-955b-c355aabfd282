@@ -32,3 +32,7 @@ CROSSED_BOUNDARY_PENALTY = 4.0
 # Penalty added whenever two consecutive subtitles are placed in different
 # vertical areas (one top, one bottom).
 AREA_SWITCH_PENALTY = 1.0
+
+# Fixed score added to the highlight-planning objective for every selected
+# clip, on top of its duration in milliseconds.
+HIGHLIGHT_CLIP_PENALTY = 1000
